@@ -323,6 +323,11 @@ void clearBuffers()
 float *flatten_array(float **array, int i, int j)
 {
    float *flattened_array = malloc(sizeof(float) * i * j);
+   if (flattened_array == NULL)
+   {
+      perror("Failed to allocate memory for flattened_array");
+      exit(1);
+   }
    int k, l;
    for (k = 0; k < i; k++)
    {
@@ -335,7 +340,7 @@ float *flatten_array(float **array, int i, int j)
 }
 
 // Sends the pointArray, drawArray, and transformArray to OpenCL Kernel and applies the transformations to the drawArray
-void transformPointArray(cl_context context, cl_command_queue queue, cl_kernel kernel)
+void transformPointArray(cl_context context, cl_command_queue queue, cl_kernel kernel, float *flattened_pointArray, float *flattened_drawArray)
 {
    // Set local and global work size dimensions for OpenCL
    size_t local_size = 64;
@@ -344,10 +349,6 @@ void transformPointArray(cl_context context, cl_command_queue queue, cl_kernel k
 
    // Create buffers
    cl_mem point_buffer, transform_buffer, draw_buffer;
-
-   // Flatten pointArray and drawArray into 1D arrays
-   float *flattened_pointArray = flatten_array(pointArray, pointCount, 4);
-   float *flattened_drawArray = flatten_array(drawArray, pointCount, 4);
 
    // Flatten transformArray into a 1D array (it is not a float ** array like the others)
    float *flattened_transformArray = malloc(sizeof(float) * 4 * 4);
@@ -421,11 +422,8 @@ void transformPointArray(cl_context context, cl_command_queue queue, cl_kernel k
       exit(1);
    }
 
-   // Allocate memory for the kernel's output
-   float *transformedPoints = (float *)malloc(sizeof(float) * 4 * pointCount);
-
    //Read the kernel's output
-   err = clEnqueueReadBuffer(queue, draw_buffer, CL_TRUE, 0, sizeof(float) * 4 * pointCount, transformedPoints, 0, NULL, NULL);
+   err = clEnqueueReadBuffer(queue, draw_buffer, CL_TRUE, 0, sizeof(float) * 4 * pointCount, flattened_drawArray, 0, NULL, NULL);
    if (err < 0)
    {
       printf("Error: %d\n", err);
@@ -436,17 +434,14 @@ void transformPointArray(cl_context context, cl_command_queue queue, cl_kernel k
    // Copy transformedPoints back into drawArray
    for (int i = 0; i < pointCount; i++)
    {
-      drawArray[i][0] = transformedPoints[i * 4];
-      drawArray[i][1] = transformedPoints[i * 4 + 1];
-      drawArray[i][2] = transformedPoints[i * 4 + 2];
-      drawArray[i][3] = transformedPoints[i * 4 + 3];
+      drawArray[i][0] = flattened_drawArray[i * 4];
+      drawArray[i][1] = flattened_drawArray[i * 4 + 1];
+      drawArray[i][2] = flattened_drawArray[i * 4 + 2];
+      drawArray[i][3] = flattened_drawArray[i * 4 + 3];
    }
 
    // Free allocated memory
-   free(flattened_pointArray);
    free(flattened_transformArray);
-   free(flattened_drawArray);
-   free(transformedPoints);
 
    // Free OpenCL resources
    clReleaseMemObject(point_buffer);
@@ -454,7 +449,7 @@ void transformPointArray(cl_context context, cl_command_queue queue, cl_kernel k
    clReleaseMemObject(draw_buffer);
 }
 
-void movePoints(cl_context context, cl_command_queue queue, cl_kernel kernel)
+void movePoints(cl_context context, cl_command_queue queue, cl_kernel kernel, float *flattened_pointArray, float *flattened_drawArray)
 {
    static int counter = 1;
    int i;
@@ -472,7 +467,7 @@ void movePoints(cl_context context, cl_command_queue queue, cl_kernel kernel)
 
    // apply the transformation to the points using OpenCL
    // OpenCL kernel setup and execution is done in transformPointArray() just so that this function is not too long
-   transformPointArray(context, queue, kernel);
+   transformPointArray(context, queue, kernel, flattened_pointArray, flattened_drawArray);
 
    // clears buffers before drawing screen
    clearBuffers();
@@ -516,6 +511,7 @@ cl_device_id create_device()
    err = clGetDeviceIDs(platform, CL_DEVICE_TYPE_GPU, 1, &dev, NULL);
    if (err == CL_DEVICE_NOT_FOUND)
    {
+      printf("GPU not found, trying CPU...\n");
       err = clGetDeviceIDs(platform, CL_DEVICE_TYPE_CPU, 1, &dev, NULL);
    }
    if (err < 0)
@@ -523,6 +519,32 @@ cl_device_id create_device()
       perror("Couldn't access any devices");
       exit(1);
    }
+
+
+   // Check if device is GPU
+   cl_device_type type;
+   err = clGetDeviceInfo(dev, CL_DEVICE_TYPE, sizeof(type), &type, NULL);
+   if (err < 0)
+   {
+      perror("Couldn't get device type");
+      exit(1);
+   }
+   if (type == CL_DEVICE_TYPE_GPU)
+      printf("Device is GPU\n");
+   else if (type == CL_DEVICE_TYPE_CPU)
+      printf("Device is CPU\n");
+   else
+      printf("Device is not GPU or CPU\n");
+
+   // Check device name
+   char name[128];
+   err = clGetDeviceInfo(dev, CL_DEVICE_NAME, sizeof(name), &name, NULL);
+   if (err < 0)
+   {
+      perror("Couldn't get device name");
+      exit(1);
+   }
+   printf("Device name: %s\n", name);
 
    return dev;
 }
@@ -684,6 +706,12 @@ int main(int argc, char *argv[])
       exit(1);
    };
 
+   // Flatten pointArray into a 1D array
+   float *flattened_pointArray = flatten_array(pointArray, pointCount, 4);
+
+   // Flatten drawArray into a 1D array
+   float *flattened_drawArray = flatten_array(drawArray, pointCount, 4);
+
 #ifndef NOGRAPHICS
    // initialize ncurses
    initscr();
@@ -702,7 +730,7 @@ int main(int argc, char *argv[])
    {
       if (drawPoints() == 1)
          break;
-      movePoints(context, queue, kernel);
+      movePoints(context, queue, kernel, flattened_pointArray, flattened_drawArray);
    }
 #endif
 
@@ -712,7 +740,7 @@ int main(int argc, char *argv[])
 
    for (i = 0; i < count; i++)
    {
-      movePoints(context, queue, kernel);
+      movePoints(context, queue, kernel, flattened_pointArray, flattened_drawArray);
    }
 #endif
 
